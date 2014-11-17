@@ -4,50 +4,21 @@
 
 Probability-based anomaly detection in Go.
 
-## Windows
+## Event Windows
 
-Inspired by Etsy's [Skyline](https://github.com/etsy/skyline) package, Anomalyzer implements a suite of statistical tests that yield the probability that a given set of numeric input, typically a time series, contains anomalous behavior.  Each test compares the behavior in an **active window** of one or more points to the behavior in a **reference window** of two or more points.
+Anomalyzer implements a suite of statistical tests that yield the probability that a given set of numeric input, typically a time series, contains anomalous behavior. It can be used in batch or streaming. Inspired by Etsy's [Skyline](https://github.com/etsy/skyline) package.
 
-Specifying a number of seasons will yield a reference window length equal to that factor times the length of the active window specified. For example, an input vector of `[1, 2, 3, 4, 5, 6, 7, 8, 9]`, and an active window length of 1 with number of seasons equal to 4, would yield an active window of `[9]` and a reference window of `[5, 6, 7, 8]`.
+Anomalyzer works against a **reference window** of events and an **active window** of events, it does not have a notion of "wall clock time", it's only sense of time is new events arriving.
 
-## Algorithms
+```
+    | e0  e1  e2  e3  e4  e5 | e6  e7  e8  e9 |
+    |------------------------|----------------|-----> time, newer events
+    |   Reference   Window   | Active  Window |
+```
 
-Anomalyzer can implement one or more of the following algorithmic tests:
+The **active window** is set directly in configuration `AnomalyzerConf{ ActiveSize: 100 }`. The **reference window** is set implicitly by choosing the "number of seasons," for example: `AnomalyzerConf{ NSeasons: 10 }` would set the **reference window** to 1000 events, in other words the size of 10 active windows. If you don't specify the number of seasons it defaults to 4.
 
-1. **cdf**: Compares the differences in the behavior in the active window to the cumulative distribution function of the reference window. 
-2. **diff**: Performs a bootstrap permutation test on the ranks of the differences in both windows, in the flavor of a [Wilcoxon rank-sum](http://en.wikipedia.org/wiki/Mann%E2%80%93Whitney_U_test) test.
-3. **high rank**: Performs a bootstrap permutation test on the ranks of the entries themselves in both windows. Counts how many times the permuted rank-sum is less than the original rank-sum, sensitive to increasing behavior.
-4. **low rank**: Similarly, counts how many times the permuted rank-sum is greater than the original rank-sum, sensitive to decreasing behavior.
-5. **magnitude**: Compares the relative magnitude of the difference between the averages of the active and the reference windows.
-6. **fence**: Indicates that data are approaching a configurable upper and lower bound.
-7. **bootstrap ks**: Calculates the [Kolmogorov-Smirnov](http://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test) test over active and reference windows and compares that value to KS test scores obtained after permuting all elements in the set. 
-
-Each test yields a probability of anomalous behavior, and the probabilities are then computed over a weighted mean to determine if the overall behavior is anomalous.  Since a *probability* is returned, the user may determine the sensitivity of the decision, and can determine the threshold for anomalous behavior for the application, whether at say 0.8 for general anomalous behavior or 0.95 for extreme anomalous behavior.
-
-## Configuration
-
-Any of the tests can be included in the anomalyzer, and if none are supplied in the configuration, default to magnitude and cdf.  Methods are supplied through the `Methods` value in the configuration and accepts a slice of strings for the method names.
-
-A value for `ActiveSize`is required and must be a minimum of 1. The `NSeasons` will default to 4 if not specified. 
-
-### Magnitude
-
-If the magnitude test is specified, a `Sensitivity` (between 0 and 1) can be supplied such that when the result of the magnitude test is less than that value, the weighted mean will return 0. If `Sensitivity` is not specified, it defaults to 0.1.
-
-### Bootstrap KS
-
-To capture seasonality, the bootstrap ks test should consider an active window length equal to a season. 
-
-### Fence
-
-The fence test can be configured to use custom `UpperBound` and `LowerBound` values for the fences.  If no lower bound is desired, set the value of `LowerBound` to `anomalyzer.NA`.
-
-### Diff & Rank
-
-The diff, bootstrap ks, and rank tests can accept a value for the number of bootstrap samples to generate, indicated by `PermCount`, and defaults to 500 if not set.
-
-
-## Example
+## Example Batch
 
 ```go
 package main
@@ -59,24 +30,95 @@ import (
 
 func main() {
 	conf := &anomalyzer.AnomalyzerConf{
-		Sensitivity: 0.1,
-		UpperBound:  5,
-		LowerBound:  anomalyzer.NA, // ignore the lower bound
-		ActiveSize:  1,
-		NSeasons:    4,
-		Methods:     []string{"diff", "fence", "highrank", "lowrank", "magnitude"},
+		ActiveSize:  100,
+		NSeasons:    4,                 // Reference window is implicitly set to 400.
+		UpperBound:  5,                 // Upper bound.
+		LowerBound:  anomalyzer.NA,     // Ignore the lower bound.
+		Methods:     []string{"fence"}, // Use just one test, but any number can be used together.
 	}
 
-	// initialize with empty data or an actual slice of floats
-	data := []float64{0.1, 2.05, 1.5, 2.5, 2.6, 2.55}
+	// Initialize with reference data.
+	data := []float64{0.1, 2.05, 1.5, 2.5, 2.6, 2.55, ...}
 
-	anom, _ := anomalyzer.NewAnomalyzer(conf, data)
+	anom, err := anomalyzer.NewAnomalyzer(conf, data)
+	if err != nil {
+		fmt.Printf("error: failed to create anomalyzer: %v\n", err)
+		return
+	}
 
-	// the push method automatically triggers a recalcuation of the
-	// anomaly probability.  The recalculation can also be triggered
-	// by a call to the Eval method.
-	prob := anom.Push(8.0)
-	fmt.Println("Anomalous Probability:", prob)
+	// Eval calculates the probability at a next
+	// event of 8.0 is anomolous.
+	p := anom.Eval(8.0)
+	fmt.Println("anomalous probability:", p)
 }
 ```
 
+## Example Streaming
+
+```go
+package main
+
+import (
+	"fmt"
+	"github.com/lytics/anomalyzer"
+)
+
+func openstream() (<-chan float64, error) {
+	... open stream ...
+}
+
+func main() {
+	conf := &anomalyzer.AnomalyzerConf{
+		ActiveSize:  100,
+		NSeasons:    4,               // Reference window is implicitly set to 400.
+		Methods:     []string{"cdf"}, // Use just one test.
+	}
+
+	anom, err := anomalyzer.NewAnomalyzer(conf, nil)
+	if err != nil {
+		fmt.Printf("error: failed to create anomalyzer: %v\n", err)
+		return
+	}
+
+	stream, err := openstream()
+	if err != nil {
+		fmt.Printf("error: failed to create stream: %v\n", err)
+	}
+
+	for e := range stream {
+		// Push automatically recalculates the
+		// anomaly probability of the pushed
+		// event.
+		p := anom.Push(e)
+		fmt.Printf("anomalous probability: %v\n", p)
+	}
+}
+```
+
+## Algorithms & Configuration
+
+Anomalyzer can be set to use multiple detectors at the same time. For example, by setting `AnomalyzerConf{ Methods: []string{"cdf", "fence", "magnitude"} }` all there algorithms would be used. 
+
+Each test yields a probability of anomalous behavior, and the probabilities are then computed over a weighted mean to determine if the overall behavior is anomalous. Since a *probability* is returned, the user can determine the threshold for anomalous behavior for the application, whether at say 0.8 for general anomalous behavior or 0.95 for extreme anomalous behavior.
+
+
+### Choosing
+
+1. **cdf** is suitable for detecting anomalous increases or decreases in the data. Theoretically, you could use it instead of using both high rank and low rank. It tends to be very sensitive.
+
+2. **diff** is suitable for detecting anomalous changes in volatile data, like fine CPU samples. It's not the ideal test for steadily increasing or decreasing data.
+
+3. **high rank** is suitable for detecting anomalous increases in the data. It can detect gradual change better than diff or magnitude might.
+
+4. **low rank** is suitable for detecting anomalous decreses in the data. It can detect gradual change better than diff or magnitude might.
+
+5. **fence** is suitable when anomalies constitue trending to some upper or lower bound. Use the configuration `AnomalyzerConf{ LowerBound: lower }` and `AnomalyzerConf{ UpperBound: upper }` to set the bounds. The value `anomalyzer.NA` can be used to have no lower bound.
+
+6. **magnitude** is suitable for detecting if event values have changed sufficiently to be considered an anomaly. Use the configuration `AnomalyzerConf{ Sensitivity: 0.1 }` to require that values have changed at least 10% to consititue an anomaly. In general, sensitivity can be set between 0 and 1. If the result of the magnitude test is less than that value, the weighted mean will return 0. If `Sensitivity` is not specified, it defaults to 0.1.
+
+7. **bootstrap ks** is especially suitable if your data is seasonal. For example, if you want to check a days worth of data and compare that to the previous four, then `ActiveSize` should be set to the number of events received in a day. And `NSeasons` should be set to 4. It calculates the [Kolmogorov-Smirnov](http://en.wikipedia.org/wiki/Kolmogorov%E2%80%93Smirnov_test) test over active and reference windows and compares that value to KS test scores obtained after permuting all elements in the set. 
+
+
+### Diff, Bootstrap and Rank
+
+The diff, bootstrap ks, and rank tests can accept a value for the number of bootstrap samples to generate, indicated by `PermCount`, and defaults to 500 if not set.
