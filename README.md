@@ -30,15 +30,25 @@ import (
 
 func main() {
 	conf := &anomalyzer.AnomalyzerConf{
-		ActiveSize:  100,
-		NSeasons:    4,                 // Reference window is implicitly set to 400.
+		ActiveSize:  2,
+		NSeasons:    3,                 // Reference window is implicitly set to 6.
 		UpperBound:  5,                 // Upper bound.
 		LowerBound:  anomalyzer.NA,     // Ignore the lower bound.
-		Methods:     []string{"fence"}, // Use just one test, but any number can be used together.
+		Methods:     []string{"fence"}, // But more than one can be used.
 	}
 
-	// Initialize with reference data.
-	data := []float64{0.1, 2.05, 1.5, 2.5, 2.6, 2.55, ...}
+	// Initialize with reference data. The last two values
+	// would be considered the "active window" since its
+	// size was set to 2, the first six values would be
+	// considered the "reference window" since the number
+	// of seasons was set to 3, ie: season size is the
+	// same as the active window size.
+	data := []float64{
+		0.1, 2.05,
+		1.5, 2.5, 
+		2.6, 2.55, 
+		1.5, 1.1,
+	}
 
 	anom, err := anomalyzer.NewAnomalyzer(conf, data)
 	if err != nil {
@@ -46,9 +56,9 @@ func main() {
 		return
 	}
 
-	// Eval calculates the probability at a next
-	// event of 8.0 is anomolous.
-	p := anom.Eval(8.0)
+	// Eval calculates the probability of anomaly in the
+	// currently data.
+	p := anom.Eval()
 	fmt.Println("anomalous probability:", p)
 }
 ```
@@ -70,7 +80,7 @@ func openstream() (<-chan float64, error) {
 func main() {
 	conf := &anomalyzer.AnomalyzerConf{
 		ActiveSize:  100,
-		NSeasons:    4,               // Reference window is implicitly set to 400.
+		NSeasons:    4,               // Reference window set to 400.
 		Methods:     []string{"cdf"}, // Use just one test.
 	}
 
@@ -97,7 +107,7 @@ func main() {
 
 ## Algorithms & Configuration
 
-Anomalyzer can be set to use multiple detectors at the same time. For example, by setting `AnomalyzerConf{ Methods: []string{"cdf", "fence", "magnitude"} }` all there algorithms would be used. 
+Anomalyzer can be set to use multiple detectors at the same time. For example, by setting `AnomalyzerConf{ Methods: []string{"cdf", "fence" } }` both algorithms would be used. 
 
 Each test yields a probability of anomalous behavior, and the probabilities are then computed over a weighted mean to determine if the overall behavior is anomalous. Since a *probability* is returned, the user can determine the threshold for anomalous behavior for the application, whether at say 0.8 for general anomalous behavior or 0.95 for extreme anomalous behavior.
 
@@ -110,9 +120,9 @@ Each test yields a probability of anomalous behavior, and the probabilities are 
 
 3. **high rank** is suitable for detecting anomalous increases in the data. It can detect gradual change better than diff or magnitude might.
 
-4. **low rank** is suitable for detecting anomalous decreses in the data. It can detect gradual change better than diff or magnitude might.
+4. **low rank** is suitable for detecting anomalous decreases in the data. It can detect gradual change better than diff or magnitude might.
 
-5. **fence** is suitable when anomalies constitue trending to some upper or lower bound. Use the configuration `AnomalyzerConf{ LowerBound: lower }` and `AnomalyzerConf{ UpperBound: upper }` to set the bounds. The value `anomalyzer.NA` can be used to have no lower bound.
+5. **fence** is suitable when anomalies constitute trending to some upper or lower bound. Use the configuration `AnomalyzerConf{ LowerBound: lower }` and `AnomalyzerConf{ UpperBound: upper }` to set the bounds. The value `anomalyzer.NA` can be used to have no lower bound.
 
 6. **magnitude** is suitable for detecting if event values have changed sufficiently to be considered an anomaly. Use the configuration `AnomalyzerConf{ Sensitivity: 0.1 }` to require that values have changed at least 10% to consititue an anomaly. In general, sensitivity can be set between 0 and 1. If the result of the magnitude test is less than that value, the weighted mean will return 0. If `Sensitivity` is not specified, it defaults to 0.1.
 
